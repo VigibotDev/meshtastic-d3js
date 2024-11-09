@@ -1,0 +1,641 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN"
+ "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+ <head>
+  <title>
+   Serveurperso.com
+  </title>
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <script src="animation.js"></script>
+  <meta http-equiv="content-type" content="text/html; charset=utf-8" />
+  <meta name="viewport" content="width=device-width, user-scalable=yes" />
+  <link rel="stylesheet" href="style.css" type="text/css" />
+  <link rel="icon" href="favicon.png" type="image/png" />
+ </head>
+ <body>
+  <input type="text" class="search-bar" placeholder="Search node..." />
+  <div class="results"></div>
+  <svg></svg>
+  <script>
+   function getShortnameColor(role) {
+    switch(role) {
+     case "CLIENT":
+      return "#080";
+     case "CLIENT_MUTE":
+      return "#00f";
+     case "ROUTER":
+      return "#80f";
+     case "IP_GATEWAY":
+      return "#888";
+     default:
+      return "#800";
+    }
+   }
+
+   const tooltip = d3.select("body").append("div").attr("class", "tooltip");
+
+   const nodeSize = 25;
+   const arrowSize = 6;
+   let simulation;
+   let zoomState = d3.zoomIdentity;
+   let selectedNode = null;
+   let isNodeHovered = false;
+
+   const zoom = d3.zoom().on("zoom", (event) => {
+    d3.select("g").attr("transform", event.transform);
+    zoomState = event.transform;
+   });
+
+   fetch("mesh.php?_=" + new Date().getTime()).then(response => response.json()).then(data => {
+    const dataCopy = JSON.parse(JSON.stringify(data));
+
+    function getSubgraphForNode(data, nodeId) {
+     const visited = new Set();
+     const stack = [nodeId];
+     const component = new Set();
+
+     while(stack.length > 0) {
+      const id = stack.pop();
+      if(!visited.has(id)) {
+       visited.add(id);
+       component.add(id);
+       const neighbors = data.links
+        .filter(link => link.source === id || link.target === id)
+        .map(link => (link.target === id ? link.source : link.target))
+        .filter(neighborId => !visited.has(neighborId));
+       stack.push(...neighbors);
+      }
+     }
+
+     const filteredNodes = data.nodes.filter(node => component.has(node.id));
+     const filteredLinks = data.links.filter(link =>
+      component.has(link.source) && component.has(link.target)
+     );
+
+     return {nodes: filteredNodes, links: filteredLinks};
+    }
+
+    function getConnectedComponents(data) {
+     const components = [];
+     const visited = new Set();
+
+     data.nodes.forEach(node => {
+      if(!visited.has(node.id)) {
+       const component = getSubgraphForNode(data, node.id).nodes;
+       component.forEach(n => visited.add(n.id));
+       components.push(component);
+      }
+     });
+
+     //components.sort((a, b) => b.length - a.length);
+
+     components.sort((a, b) => {
+      const meshA = getSubgraphForNode(data, a[0].id);
+      const meshB = getSubgraphForNode(data, b[0].id);
+      return meshB.links.length - meshA.links.length;
+     });
+
+     return components;
+    }
+
+    function loadMeshSimulation(selectedMesh) {
+     const selectedMeshCopy = JSON.parse(JSON.stringify(selectedMesh));
+     d3.select("svg").selectAll("*").remove();
+
+     const svg = d3.select("svg");
+     const g = svg.append("g");
+
+     svg.call(zoom);
+     svg.call(zoom.transform, zoomState);
+
+     g.append("defs").append("marker")
+      .attr("id", "arrowhead-start-bidirectionnal")
+      .attr("viewBox", "0 -5 10 10")
+      .attr("refX", 5)
+      .attr("refY", 0)
+      .attr("orient", "auto-start-reverse")
+      .attr("markerWidth", arrowSize)
+      .attr("markerHeight", arrowSize)
+      .append("path")
+      .attr("d", "M 0,-5 L 10,0 L 0,5")
+      .attr("fill", "#aaa");
+
+     g.append("defs").append("marker")
+      .attr("id", "arrowhead-end-bidirectionnal")
+      .attr("viewBox", "0 -5 10 10")
+      .attr("refX", 5)
+      .attr("refY", 0)
+      .attr("orient", "auto")
+      .attr("markerWidth", arrowSize)
+      .attr("markerHeight", arrowSize)
+      .append("path")
+      .attr("d", "M 0,-5 L 10,0 L 0,5")
+      .attr("fill", "#aaa");
+
+     g.append("defs").append("marker")
+      .attr("id", "arrowhead-start-unidirectionnal")
+      .attr("viewBox", "0 -5 10 10")
+      .attr("refX", 5)
+      .attr("refY", 0)
+      .attr("orient", "auto-start-reverse")
+      .attr("markerWidth", arrowSize)
+      .attr("markerHeight", arrowSize)
+      .append("path")
+      //.attr("d", "M 0,-5 L 10,0 L 0,5")
+      .attr("d", "M 10,-5 L 0,0 L 10,5")
+      .attr("fill", "#f00");
+
+     g.append("defs").append("marker")
+      .attr("id", "arrowhead-end-unidirectionnal")
+      .attr("viewBox", "0 -5 10 10")
+      .attr("refX", 5)
+      .attr("refY", 0)
+      .attr("orient", "auto")
+      .attr("markerWidth", arrowSize)
+      .attr("markerHeight", arrowSize)
+      .append("path")
+      .attr("d", "M 0,-5 L 10,0 L 0,5")
+      .attr("fill", "#0f0");
+
+     const linkLayer = g.append("g").attr("class", "links");
+     const nodeLayer = g.append("g").attr("class", "nodes");
+     const arrowLayer = g.append("g").attr("class", "arrows");
+
+     const linkDirectionMap = new Map();
+
+     selectedMesh.links.forEach(link => {
+      const key = `${Math.min(link.source, link.target)}-${Math.max(link.source, link.target)}`;
+
+      if(linkDirectionMap.has(key)) {
+       const existingLink = linkDirectionMap.get(key);
+       existingLink.bidirectional = true;
+       existingLink.snr = (existingLink.snr + link.snr) / 2;
+      } else {
+       link.bidirectional = false;
+       linkDirectionMap.set(key, link);
+      }
+     });
+
+     const filteredLinks = [...linkDirectionMap.values()];
+
+     const inboundSegment = linkLayer.selectAll(".link.inbound-unidirectional")
+      .data(filteredLinks.filter(d => !d.bidirectional))
+      .enter().append("line")
+      .attr("class", "link inbound-unidirectional")
+      .attr("data-source", d => d.source)
+      .attr("data-target", d => d.target);
+
+     const outboundSegment = linkLayer.selectAll(".link.outbound-unidirectional")
+      .data(filteredLinks.filter(d => !d.bidirectional))
+      .enter().append("line")
+      .attr("class", "link outbound-unidirectional")
+      .attr("data-source", d => d.source)
+      .attr("data-target", d => d.target);
+
+     const fullLink = linkLayer.selectAll("line.full-bidirectional")
+      .data(filteredLinks.filter(d => d.bidirectional))
+      .enter().append("line")
+      .attr("class", "link full-bidirectional")
+      .attr("data-source", d => d.source)
+      .attr("data-target", d => d.target);
+
+     const node = nodeLayer.selectAll("g")
+      .data(selectedMesh.nodes)
+      .enter().append("g")
+      .attr("class", "node")
+      .attr("data-id", d => d.id)
+      .style("cursor", "move")
+      .on("mouseover", function(event, d) {
+       if(!isNodeHovered) {
+        isNodeHovered = true;
+
+        // Objet original avec que des liens unidirectionnels
+        animationManager.initialize(selectedMeshCopy);
+        animationManager.startNodeTransmission(this, d, selectedMeshCopy, highlightNodeAndLinks, unhighlightNodeAndLinks);
+
+        // Objet D3.js avec les liens bidirectionnels fusionés et les données des noeuds dans les liens
+        //animationManager.initialize(selectedMesh);
+        //animationManager.startNodeTransmission(this, d, selectedMesh, highlightNodeAndLinks, unhighlightNodeAndLinks);
+
+        showTooltip(d);
+       }
+      })
+      .on("mouseleave", function(event, d) {
+       if(isNodeHovered) {
+        isNodeHovered = false;
+
+        // Objet original avec que des liens unidirectionnels
+        animationManager.stopCurrentAnimation(selectedMeshCopy);
+
+        // Objet D3.js avec les liens bidirectionnels fusionés et les données des noeuds dans les liens
+        //animationManager.stopCurrentAnimation(selectedMesh);
+
+        d3.selectAll(".node circle").attr("opacity", 0.5);
+        d3.selectAll(".link").classed("full-bidirectional-highlight", false)
+         .classed("inbound-unidirectional-highlight", false)
+         .classed("outbound-unidirectional-highlight", false);
+        hideTooltip();
+       }
+      })
+      .call(d3.drag()
+       .on("start", dragstarted)
+       .on("drag", dragged)
+       .on("end", dragended));
+
+     node.append("circle")
+      .attr("r", nodeSize)
+      .attr("fill", d => getShortnameColor(d.role))
+      .attr("opacity", 0.5);
+
+     node.append("text")
+      .attr("x", 0)
+      .attr("y", 0)
+      .text(d => d.short_name)
+      .style("font-size", d => /\p{Extended_Pictographic}/u.test(d.short_name) ? "18px" : "12px");
+
+     const arrows = arrowLayer.selectAll("line")
+      .data(filteredLinks)
+      .enter().append("line")
+      .attr("class", "arrow")
+      .attr("marker-end", d => d.bidirectional ? "url(#arrowhead-end-bidirectionnal)" : "url(#arrowhead-end-unidirectionnal)")
+      .attr("marker-start", d => d.bidirectional ? "url(#arrowhead-start-bidirectionnal)" : "url(#arrowhead-start-unidirectionnal)");
+
+     simulation = d3.forceSimulation(selectedMesh.nodes)
+      .force("link", d3.forceLink(filteredLinks).id(d => d.id).distance(d => 220 - d.snr * 15))
+      .force("charge", d3.forceManyBody().strength(-200))
+      .force("center", d3.forceCenter(window.innerWidth / 2, window.innerHeight / 2))
+      .force("collide", d3.forceCollide().radius(30))
+      .alphaDecay(0.005)
+      .alphaMin(0.001);
+
+     simulation.on("tick", () => {
+      inboundSegment
+       .each(function(d) {
+        const middle = calculateMidpoint(d.target, d.source);
+        d3.select(this)
+         .attr("x1", middle.x)
+         .attr("y1", middle.y)
+         .attr("x2", calculateAdjustedPosition(d.source, d.target, nodeSize).targetX)
+         .attr("y2", calculateAdjustedPosition(d.source, d.target, nodeSize).targetY);
+       });
+
+      outboundSegment
+       .each(function(d) {
+        const middle = calculateMidpoint(d.target, d.source);
+        d3.select(this)
+         .attr("x1", calculateAdjustedPosition(d.target, d.source, nodeSize).sourceX)
+         .attr("y1", calculateAdjustedPosition(d.target, d.source, nodeSize).sourceY)
+         .attr("x2", middle.x)
+         .attr("y2", middle.y);
+       });
+
+      const inboundSegmentHighlights = linkLayer.selectAll("line.inbound-unidirectional-highlight");
+      inboundSegmentHighlights
+       .each(function(d) {
+        const middle = calculateMidpoint(d.target, d.source);
+        d3.select(this)
+         .attr("x1", middle.x)
+         .attr("y1", middle.y)
+         .attr("x2", calculateAdjustedPosition(d.source, d.target, nodeSize).targetX)
+         .attr("y2", calculateAdjustedPosition(d.source, d.target, nodeSize).targetY);
+       });
+
+      const outboundSegmentHighlights = linkLayer.selectAll("line.outbound-unidirectional-highlight");
+      outboundSegmentHighlights
+       .each(function(d) {
+        const middle = calculateMidpoint(d.target, d.source);
+        d3.select(this)
+         .attr("x1", calculateAdjustedPosition(d.target, d.source, nodeSize).sourceX)
+         .attr("y1", calculateAdjustedPosition(d.target, d.source, nodeSize).sourceY)
+         .attr("x2", middle.x)
+         .attr("y2", middle.y);
+       });
+
+      fullLink
+       .each(function(d) {
+        d3.select(this)
+         .attr("x1", calculateAdjustedPosition(d.source, d.target, nodeSize).sourceX)
+         .attr("y1", calculateAdjustedPosition(d.source, d.target, nodeSize).sourceY)
+         .attr("x2", calculateAdjustedPosition(d.target, d.source, nodeSize).targetX)
+         .attr("y2", calculateAdjustedPosition(d.target, d.source, nodeSize).targetY);
+       });
+
+      node.attr("transform", d => `translate(${d.x},${d.y})`);
+
+      arrows
+       .each(function(d) {
+        d3.select(this)
+         .attr("x1", calculateAdjustedPosition(d.source, d.target, nodeSize - arrowSize / 2).sourceX)
+         .attr("y1", calculateAdjustedPosition(d.source, d.target, nodeSize - arrowSize / 2).sourceY)
+         .attr("x2", calculateAdjustedPosition(d.target, d.source, nodeSize - arrowSize / 2).targetX)
+         .attr("y2", calculateAdjustedPosition(d.target, d.source, nodeSize - arrowSize / 2).targetY);
+       });
+     });
+    }
+
+    // Objet original avec que des liens unidirectionnels
+    function highlightNodeAndLinks(nodeElement, d, links) {
+     d3.select(nodeElement).select("circle").attr("opacity", 1);
+
+     links.forEach(link => {
+      if(link.source === d.id || link.target === d.id) {
+
+       d3.selectAll(`.link.full-bidirectional[data-source="${link.source}"][data-target="${link.target}"]`)
+        .classed("full-bidirectional-highlight", true)
+        .raise();
+       d3.selectAll(`.link.full-bidirectional[data-source="${link.target}"][data-target="${link.source}"]`)
+        .classed("full-bidirectional-highlight", true)
+        .raise();
+
+       if(link.source === d.id) {
+        d3.selectAll(`.link.outbound-unidirectional[data-source="${link.source}"][data-target="${link.target}"]`)
+         .classed("outbound-unidirectional-highlight", true)
+         .raise();
+        d3.selectAll(`.link.inbound-unidirectional[data-source="${link.source}"][data-target="${link.target}"]`)
+         .classed("inbound-unidirectional-highlight", true)
+         .raise();
+       } else {
+        d3.selectAll(`.link.outbound-unidirectional[data-source="${link.target}"][data-target="${link.source}"]`)
+         .classed("outbound-unidirectional-highlight", true)
+         .raise();
+        d3.selectAll(`.link.inbound-unidirectional[data-source="${link.target}"][data-target="${link.source}"]`)
+         .classed("inbound-unidirectional-highlight", true)
+         .raise();
+       }
+      }
+     });
+    }
+
+    function unhighlightNodeAndLinks(nodeElement, d, links) {
+     d3.select(nodeElement).select("circle").attr("opacity", 0.5);
+
+     links.forEach(link => {
+      if(link.source === d.id || link.target === d.id) {
+
+       d3.selectAll(`.link.full-bidirectional[data-source="${link.source}"][data-target="${link.target}"]`)
+        .classed("full-bidirectional-highlight", false);
+       d3.selectAll(`.link.full-bidirectional[data-source="${link.target}"][data-target="${link.source}"]`)
+        .classed("full-bidirectional-highlight", false);
+
+       if(link.source === d.id) {
+        d3.selectAll(`.link.outbound-unidirectional[data-source="${link.source}"][data-target="${link.target}"]`)
+         .classed("outbound-unidirectional-highlight", false);
+        d3.selectAll(`.link.inbound-unidirectional[data-source="${link.source}"][data-target="${link.target}"]`)
+         .classed("inbound-unidirectional-highlight", false);
+       } else {
+        d3.selectAll(`.link.outbound-unidirectional[data-source="${link.target}"][data-target="${link.source}"]`)
+         .classed("outbound-unidirectional-highlight", false);
+        d3.selectAll(`.link.inbound-unidirectional[data-source="${link.target}"][data-target="${link.source}"]`)
+         .classed("inbound-unidirectional-highlight", false);
+       }
+      }
+     });
+    }
+
+    // Objet D3.js avec les liens bidirectionnels fusionés et les données des noeuds dans les liens
+    /*function highlightNodeAndLinks(nodeElement, d, links) {
+     d3.select(nodeElement).select("circle").attr("opacity", 1);
+
+     links.forEach(link => {
+      if(link.source.id === d.id || link.target.id === d.id) {
+       if(link.bidirectional)
+        d3.selectAll(".link").filter(l => l === link).classed("full-bidirectional-highlight", true).raise();
+       else if(!link.bidirectional) {
+        if(link.source.id === d.id) {
+         d3.selectAll(".link.inbound-unidirectional").filter(l => l === link).classed("inbound-unidirectional-highlight", true).raise();
+         d3.selectAll(".link.outbound-unidirectional").filter(l => l === link).classed("outbound-unidirectional-highlight", true).raise();
+        }
+       }
+      }
+     });
+    }
+
+    function unhighlightNodeAndLinks(nodeElement, d, links) {
+     d3.select(nodeElement).select("circle").attr("opacity", 0.5);
+
+     links.forEach(link => {
+      if(link.source.id === d.id || link.target.id === d.id) {
+       d3.selectAll(".link").filter(l => l === link).classed("full-bidirectional-highlight", false)
+        .classed("inbound-unidirectional-highlight", false)
+        .classed("outbound-unidirectional-highlight", false);
+      }
+     });
+    }*/
+
+    function showTooltip(d) {
+     let updatedDate = new Date(d.updated_at * 1000);
+     updatedDate.setMinutes(updatedDate.getMinutes() - updatedDate.getTimezoneOffset());
+
+     let tooltipHtml = "<b>Name</b> <span class=\"shortname\" style=\"background-color: " + getShortnameColor(d.role) + ";\">" + d.short_name + "</span> " + d.long_name +
+                       "<br><b>MAC</b> <span style=\"color: #ff0;\">" + d.id.toString(16) + "</span> " + d.id +
+                       "<br><b>Updated</b> " + updatedDate.toLocaleString();
+
+     let neighborsUpdatedDate = new Date(d.neighbours_updated_at * 1000);
+     neighborsUpdatedDate.setMinutes(neighborsUpdatedDate.getMinutes() - neighborsUpdatedDate.getTimezoneOffset());
+
+     if(d.neighbours_updated_at === null)
+      tooltipHtml += "<br><b>Neighbors</b> <span style=\"background-color: #080;\">Traceroute data only</span>";
+     else
+      tooltipHtml += "<br><b>Neighbors</b> " + neighborsUpdatedDate.toLocaleString();
+
+     if(d.role === "ROUTER_CLIENT")
+      tooltipHtml += "<br><b>Role</b> <span style=\"background-color: #800;\">ROUTER_CLIENT is deprecated</span>";
+     else
+      tooltipHtml += `<br><b>Role</b> <span style="background-color: ${getShortnameColor(d.role)};">${d.role}</span>`;
+
+     tooltipHtml += "<br><b>Hardware</b> " + d.hardware_model;
+
+     if(d.battery_level !== null) {
+      if(d.battery_level === 101)
+       tooltipHtml += "<br><b>Battery</b> Plugged In";
+      else
+       tooltipHtml += "<br><b>Battery</b> " + d.battery_level + " %";
+     }
+
+     if(d.voltage !== null)
+      tooltipHtml += "<br><b>Voltage</b> " + Number(d.voltage).toFixed(2) + " V";
+     if(d.air_util_tx !== null)
+      tooltipHtml += "<br><b>TX</b> " + Number(d.air_util_tx).toFixed(1) + " %";
+     if(d.channel_utilization !== null)
+      tooltipHtml += "<br><b>RX</b> " + Number(d.channel_utilization).toFixed(1) + " %";
+     if(d.temperature !== null)
+      tooltipHtml += "<br><b>Temperature</b> " + Number(d.temperature).toFixed(1) + " °C";
+     if(d.relative_humidity !== null)
+      tooltipHtml += "<br><b>Humidity</b> " + Number(d.relative_humidity).toFixed(1) + " %";
+     if(d.barometric_pressure !== null)
+      tooltipHtml += "<br><b>Pressure</b> " + Number(d.barometric_pressure).toFixed(1) + " hPa";
+     tooltip.html(tooltipHtml);
+     tooltip.style("visibility", "visible");
+    }
+
+    function hideTooltip() {
+     tooltip.style("visibility", "hidden");
+    }
+
+    function populateSearchResults() {
+     const components = getConnectedComponents(data);
+     resultsDiv.innerHTML = "";
+
+     const singleNodes = [];
+
+     components.forEach((component, index) => {
+      const mesh = getSubgraphForNode(data, component[0].id);
+      const numberOfLinks = mesh.links.length;
+
+      if(component.length > 1) {
+       const separator = document.createElement("div");
+       separator.className = "separator";
+       separator.setAttribute("data-entete", "true");
+       separator.textContent = `Mesh with ${component.length} nodes and ${numberOfLinks} links`;
+       resultsDiv.appendChild(separator);
+
+       const sortedNodes = component.slice().sort((a, b) => a.long_name.localeCompare(b.long_name));
+
+       sortedNodes.forEach((node) => {
+        const resultDiv = document.createElement("div");
+        resultDiv.setAttribute("data-entete", "false");
+
+        resultDiv.innerHTML = `<span class=\"shortname\" style=\"background-color: ${getShortnameColor(node.role)};\">${node.short_name}</span> ${node.long_name} <span style=\"color: #ff0;\">${node.id.toString(16)}</span>`;
+        resultDiv.addEventListener("mousedown", () => {
+         resultsDiv.style.display = "none";
+         const selectedMesh = getSubgraphForNode(dataCopy, node.id);
+         const selectedMeshCopy = JSON.parse(JSON.stringify(selectedMesh));
+         loadMeshSimulation(selectedMeshCopy);
+
+         // Objet original avec que des liens unidirectionnels
+         animationManager.initialize(selectedMesh);
+         animationManager.startNodeTransmission(d3.select(`[data-id="${node.id}"]`).node(), node, selectedMesh, highlightNodeAndLinks, unhighlightNodeAndLinks);
+
+         // Objet D3.js avec les liens bidirectionnels fusionés et les données des noeuds dans les liens
+         //animationManager.initialize(selectedMeshCopy);
+         //animationManager.startNodeTransmission(d3.select(`[data-id="${node.id}"]`).node(), node, selectedMeshCopy, highlightNodeAndLinks, unhighlightNodeAndLinks);
+
+         showTooltip(node);
+        });
+
+        resultsDiv.appendChild(resultDiv);
+       });
+      } else
+       singleNodes.push(component[0]);
+     });
+
+     if(singleNodes.length > 0) {
+      const separator = document.createElement("div");
+      separator.className = "separator";
+      separator.setAttribute("data-entete", "true");
+      separator.textContent = `${singleNodes.length} nodes without neighbors`;
+      resultsDiv.appendChild(separator);
+
+      const sortedSingleNodes = singleNodes.slice().sort((a, b) => a.long_name.localeCompare(b.long_name));
+
+      sortedSingleNodes.forEach((node) => {
+       const resultDiv = document.createElement("div");
+       resultDiv.setAttribute("data-entete", "false");
+       resultDiv.innerHTML = `<span class=\"shortname\" style=\"background-color: ${getShortnameColor(node.role)};\">${node.short_name}</span> ${node.long_name} <span style=\"color: #ff0;\">${node.id.toString(16)}</span>`;
+       resultDiv.addEventListener("mousedown", () => {
+        resultsDiv.style.display = "none";
+        const selectedMesh = getSubgraphForNode(dataCopy, node.id);
+        const selectedMeshCopy = JSON.parse(JSON.stringify(selectedMesh));
+        loadMeshSimulation(selectedMeshCopy);
+
+        // Objet original avec que des liens unidirectionnels
+        animationManager.initialize(selectedMesh);
+        animationManager.startNodeTransmission(d3.select(`[data-id="${node.id}"]`).node(), node, selectedMesh, highlightNodeAndLinks, unhighlightNodeAndLinks);
+
+        // Objet D3.js avec les liens bidirectionnels fusionés et les données des noeuds dans les liens
+        //animationManager.initialize(selectedMeshCopy);
+        //animationManager.startNodeTransmission(d3.select(`[data-id="${node.id}"]`).node(), node, selectedMeshCopy, highlightNodeAndLinks, unhighlightNodeAndLinks);
+
+        showTooltip(node);
+       });
+
+       resultsDiv.appendChild(resultDiv);
+      });
+     }
+    }
+
+    const searchBar = document.querySelector(".search-bar");
+    const resultsDiv = document.querySelector(".results");
+
+    function showResults(query) {
+     const items = Array.from(resultsDiv.querySelectorAll("div"));
+     items.forEach(item => {
+      if(item.getAttribute("data-entete") === "true")
+       item.style.display = "block";
+      else if(!query || item.textContent.toLowerCase().includes(query.toLowerCase()))
+       item.style.display = "block";
+      else
+       item.style.display = "none";
+     });
+    }
+
+    searchBar.addEventListener("input", (event) => {
+     const query = event.target.value.trim();
+     resultsDiv.style.display = "block";
+     showResults(query);
+    });
+
+    searchBar.addEventListener("focus", () => {
+     resultsDiv.style.display = "block";
+     showResults(searchBar.value.trim());
+    });
+
+    searchBar.addEventListener("blur", () => {
+     resultsDiv.style.display = "none";
+    });
+
+    function dragstarted(event, d) {
+     if(!event.active)
+      simulation.alphaTarget(0.3).restart();
+     d.fx = d.x;
+     d.fy = d.y;
+    }
+
+    function dragged(event, d) {
+     d.fx = event.x;
+     d.fy = event.y;
+    }
+
+    function dragended(event, d) {
+     if(!event.active)
+      simulation.alphaTarget(0);
+     d.fx = null;
+     d.fy = null;
+    }
+
+    function calculateMidpoint(source, target) {
+     return {
+      x: (source.x + target.x) / 2,
+      y: (source.y + target.y) / 2
+     };
+    }
+
+    function calculateAdjustedPosition(source, target, margin) {
+     const dx = target.x - source.x;
+     const dy = target.y - source.y;
+     const distance = Math.sqrt(dx * dx + dy * dy);
+     const ratio = (distance - margin) / distance;
+     const sourceRatio = margin / distance;
+
+     return {
+      sourceX: source.x + dx * sourceRatio,
+      sourceY: source.y + dy * sourceRatio,
+      targetX: target.x - dx * ratio,
+      targetY: target.y - dy * ratio
+     };
+    }
+
+    populateSearchResults();
+    const firstNode = getConnectedComponents(data)[0][0];
+    const selectedMesh = getSubgraphForNode(data, firstNode.id);
+    loadMeshSimulation(selectedMesh);
+   });
+  </script>
+
+  <div class="bottom">
+   Live Radio Network Topology and CSMA/CA Simulation
+   - Based on traceroute requests from <a href="https://flasher.meshtastic.org" onclick="this.target='_blank';">Meshtastic 2.5 firmware</a>
+   - <a href="https://www.vigibot.com" onclick="this.target='_blank';">Vigibot.com</a>
+  </div>
+ </body>
+</html>
