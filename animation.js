@@ -275,7 +275,7 @@ const animationManager = {
   const regularNodes = [];
   const clientMuteNodes = [];
 
-  Object.keys(this.nodeStates).forEach(nodeId => {
+  Object.keys(this.nodeStates).forEach((nodeId) => {
    const state = this.nodeStates[nodeId];
    let backgroundColor = "#222";
 
@@ -286,7 +286,9 @@ const animationManager = {
    else if(state.rxCount >= 1)
     backgroundColor = "#00f";
 
-   const nodeInfo = `<span class="shortname" style="background-color:${backgroundColor};">${state.shortName}</span> ${state.retryCount} ${state.rxCount}<br>`;
+   const rxDisplay = state.rxCount > 9 ? "+" : state.rxCount;
+
+   const nodeInfo = `<span class="shortname" style="background-color:${backgroundColor};">${state.shortName}</span> ${state.retryCount} ${rxDisplay}<br>`;
 
    if(state.role === "CLIENT_MUTE")
     clientMuteNodes.push(nodeInfo);
@@ -294,9 +296,15 @@ const animationManager = {
     regularNodes.push(nodeInfo);
   });
 
+  const allNodes = [...regularNodes, ...clientMuteNodes];
+
+  const middleIndex = Math.ceil(allNodes.length / 2);
+  const column1 = allNodes.slice(0, middleIndex).join("");
+  const column2 = allNodes.slice(middleIndex).join("");
+
   statsInfo += "<div style=\"display: flex; gap: 10px;\">";
-  statsInfo += `<div>${regularNodes.join("")}</div>`;
-  statsInfo += `<div>${clientMuteNodes.join("")}</div>`;
+  statsInfo += `<div>${column1}</div>`;
+  statsInfo += `<div>${column2}</div>`;
   statsInfo += "</div>";
 
   let statsDiv = tooltipElement.select(".stats-info");
